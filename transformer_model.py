@@ -2,7 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
-import assignment3_utils as utils
+import project_utils as utils
 
 from torch import Tensor
 from torch.nn import functional as F
