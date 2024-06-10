@@ -398,3 +398,117 @@ def seed_everything(seed=42):
     # Configure PyTorch to be deterministic
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    
+    
+    
+    
+    
+    
+def batch_trace(X):
+    """
+    Expect a matrix of shape B N N, returns the trace in shape B
+    :param X:
+    :return:
+    """
+    diag = torch.diagonal(X, dim1=-2, dim2=-1)
+    trace = diag.sum(dim=-1)
+    return trace
+
+
+def batch_diagonal(X):
+    """
+    Extracts the diagonal from the last two dims of a tensor
+    :param X:
+    :return:
+    """
+    return torch.diagonal(X, dim1=-2, dim2=-1)
+
+
+class KNodeCycles:
+    """ Builds cycle counts for each node in a graph.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def calculate_kpowers(self):
+        self.k1_matrix = self.adj_matrix.float()
+        self.d = self.adj_matrix.sum(dim=-1)
+        self.k2_matrix = self.k1_matrix @ self.adj_matrix.float()
+        self.k3_matrix = self.k2_matrix @ self.adj_matrix.float()
+        self.k4_matrix = self.k3_matrix @ self.adj_matrix.float()
+        self.k5_matrix = self.k4_matrix @ self.adj_matrix.float()
+        self.k6_matrix = self.k5_matrix @ self.adj_matrix.float()
+
+    def k3_cycle(self):
+        """ tr(A ** 3). """
+        c3 = batch_diagonal(self.k3_matrix)
+        return (c3 / 2).unsqueeze(-1).float(), (torch.sum(c3, dim=-1) / 6).unsqueeze(-1).float()
+
+    def k4_cycle(self):
+        diag_a4 = batch_diagonal(self.k4_matrix)
+        c4 = diag_a4 - self.d * (self.d - 1) - (self.adj_matrix @ self.d.unsqueeze(-1)).sum(dim=-1)
+        return (c4 / 2).unsqueeze(-1).float(), (torch.sum(c4, dim=-1) / 8).unsqueeze(-1).float()
+
+    def k5_cycle(self):
+        diag_a5 = batch_diagonal(self.k5_matrix)
+        triangles = batch_diagonal(self.k3_matrix)
+        c5 = diag_a5 - 2 * triangles * self.d - (self.adj_matrix @ triangles.unsqueeze(-1)).sum(dim=-1) + triangles
+        return (c5 / 2).unsqueeze(-1).float(), (c5.sum(dim=-1) / 10).unsqueeze(-1).float()
+
+    def k6_cycle(self):
+        term_1_t = batch_trace(self.k6_matrix)
+        term_2_t = batch_trace(self.k3_matrix ** 2)
+        term3_t = torch.sum(self.adj_matrix * self.k2_matrix.pow(2), dim=[-2, -1])
+        d_t4 = batch_diagonal(self.k2_matrix)
+        a_4_t = batch_diagonal(self.k4_matrix)
+        term_4_t = (d_t4 * a_4_t).sum(dim=-1)
+        term_5_t = batch_trace(self.k4_matrix)
+        term_6_t = batch_trace(self.k3_matrix)
+        term_7_t = batch_diagonal(self.k2_matrix).pow(3).sum(-1)
+        term8_t = torch.sum(self.k3_matrix, dim=[-2, -1])
+        term9_t = batch_diagonal(self.k2_matrix).pow(2).sum(-1)
+        term10_t = batch_trace(self.k2_matrix)
+
+        c6_t = (term_1_t - 3 * term_2_t + 9 * term3_t - 6 * term_4_t + 6 * term_5_t - 4 * term_6_t + 4 * term_7_t +
+                3 * term8_t - 12 * term9_t + 4 * term10_t)
+        return None, (c6_t / 12).unsqueeze(-1).float()
+
+    def k_cycles(self, adj_matrix, verbose=False):
+        self.adj_matrix = adj_matrix
+        self.calculate_kpowers()
+
+        k3x, k3y = self.k3_cycle()
+        assert (k3x >= -0.1).all()
+
+        k4x, k4y = self.k4_cycle()
+        assert (k4x >= -0.1).all()
+
+        k5x, k5y = self.k5_cycle()
+        assert (k5x >= -0.1).all(), k5x
+
+        _, k6y = self.k6_cycle()
+        assert (k6y >= -0.1).all()
+
+        kcyclesx = torch.cat([k3x, k4x, k5x], dim=-1)
+        kcyclesy = torch.cat([k3y, k4y, k5y, k6y], dim=-1)
+        return kcyclesx, kcyclesy
+    
+    
+    
+    
+class NodeCycleFeatures:
+    def __init__(self):
+        self.kcycles = KNodeCycles()
+
+    def __call__(self, noisy_data,node_mask):
+        adj_matrix = noisy_data.E[..., 1:].sum(dim=-1).float()
+
+        x_cycles, y_cycles = self.kcycles.k_cycles(adj_matrix=adj_matrix)   # (bs, n_cycles)
+        x_cycles = x_cycles.type_as(adj_matrix) * node_mask.unsqueeze(-1)
+        # Avoid large values when the graph is dense
+        x_cycles = x_cycles / 10
+        y_cycles = y_cycles / 10
+        x_cycles[x_cycles > 1] = 1
+        y_cycles[y_cycles > 1] = 1
+        return x_cycles, y_cycles
